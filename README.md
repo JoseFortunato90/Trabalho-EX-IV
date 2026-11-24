@@ -37,6 +37,7 @@ A aplicação deve oferecer uma interface simples e intuitiva para carregar o ar
 5. **Geração com LLM e RAG:** gerar as questões utilizando o LLM integrado à arquitetura RAG.
 6. **Visualização dos resultados:** apresentar as questões geradas em uma interface para visualização.
 7. **Revisão e aprovação:** permitir que o professor revise e aprove as questões geradas.
+8. **Exportação em PDF:** permitir exportar a prova gerada em PDF, com opção de incluir ou não o gabarito.
 
 As questões devem permanecer fiéis ao conteúdo dos documentos fornecidos.
 
@@ -48,12 +49,13 @@ As questões devem permanecer fiéis ao conteúdo dos documentos fornecidos.
 4. Geração das questões por meio do LLM.
 5. Apresentação dos resultados.
 6. Revisão e aprovação pelo professor.
+7. Exportação da prova em PDF, com gabarito opcional.
 
 Esse fluxo representa a proposta funcional, não uma arquitetura técnica definitiva.
 
 ### 2.3 Limites do escopo
 
-Funcionalidades não previstas na proposta não devem ser implementadas sem autorização. Itens como autenticação, multiusuário, exportação de provas e persistência de aprovações não foram definidos e permanecem como pendências.
+Funcionalidades não previstas na proposta não devem ser implementadas sem autorização. Itens como autenticação, multiusuário e persistência de aprovações não foram definidos e permanecem como pendências. A exportação disponível hoje limita-se ao formato PDF.
 
 ## 3. Arquitetura geral
 
@@ -76,11 +78,25 @@ Responsável pela lógica de negócio e pelo processamento:
 - Recuperação de informações utilizando RAG.
 - Integração com o LLM.
 - Geração das questões de múltipla escolha e subjetivas.
+- Geração e exportação da prova em PDF.
 - Disponibilização dos resultados para o frontend.
 
 ### 3.3 Comunicação entre os módulos
 
-Espera-se que o frontend envie requisições ao backend com o documento e as configurações da geração, e que o backend devolva as questões geradas. A implementação atual do backend já expõe uma API HTTP, mas o contrato definitivo, o formato dos dados e a política de erros ainda precisam ser definidos e documentados.
+Espera-se que o frontend envie requisições ao backend com o documento e as configurações da geração, e que o backend devolva as questões geradas. A implementação atual já expõe uma API HTTP; os endpoints abaixo representam o contrato em uso, ainda sujeito a consolidação e documentação definitiva.
+
+### 3.4 Endpoints HTTP atuais
+
+| Método | Rota | Entrada | Saída |
+|---|---|---|---|
+| `GET` | `/` | — | Mensagem de verificação da API. |
+| `POST` | `/documents/upload` | Arquivo multipart (`.pdf` ou `.txt`). | Mensagem de sucesso e metadados da indexação. |
+| `POST` | `/questions/generate` | `BatchQuestionRequest` (`query` e lista de tipos de questão). | Lista de `QuestionResponse`. |
+| `POST` | `/exams/generate` | `ExamRequest` (`title`, `query`, `quantity` e distribuição por tipo). | `ExamResponse`. |
+| `POST` | `/exams/pdf` | `ExamRequest` e o parâmetro de consulta `include_answer_key`. | Arquivo PDF da prova gerada. |
+| `POST` | `/exams/pdf/from-exam` | `ExamResponse` e o parâmetro de consulta `include_answer_key`. | Arquivo PDF da prova informada, sem nova chamada ao LLM. |
+
+Validações atuais: o upload aceita apenas arquivos `.pdf` e `.txt`; a geração de questões em lote aceita de 1 a 50 tipos; a geração de prova exige `quantity` entre 1 e 50 e que `multiple_choice + subjective` seja igual a `quantity`; a recuperação de contexto utiliza `top_k=5`.
 
 ## 4. Tecnologias
 
@@ -102,7 +118,8 @@ As tecnologias abaixo já fazem parte do projeto e são apenas identificadas nes
 - `python-multipart`
 - `pypdf`
 - `langchain-text-splitters`
-- ChromaDB, por meio do diretório `chroma/` e da integração `langchain-chroma`
+- `reportlab`, utilizado na geração dos arquivos PDF das provas.
+- ChromaDB, por meio do diretório `backend/chroma/` e da integração `langchain-chroma`
 
 **Implementação atual, sujeita a confirmação:**
 
@@ -146,8 +163,17 @@ Nenhuma decisão tecnológica adicional foi tomada nesta etapa.
 │   │   ├── main.py
 │   │   ├── models/
 │   │   ├── routes/
+│   │   │   ├── documents.py
+│   │   │   ├── exam_pdf.py
+│   │   │   ├── exams.py
+│   │   │   └── questions.py
 │   │   ├── schemas/
+│   │   │   ├── exam.py
+│   │   │   └── question.py
 │   │   └── services/
+│   │       ├── llm.py
+│   │       ├── pdf.py
+│   │       └── rag.py
 │   └── chroma/
 └── frontend/
     └── AGENTS.md
@@ -161,9 +187,9 @@ Nenhuma decisão tecnológica adicional foi tomada nesta etapa.
 - **`backend/app/`**: código da aplicação backend.
   - `main.py`: ponto de entrada da API.
   - `models/`: modelos internos.
-  - `routes/`: rotas da API.
-  - `schemas/`: contratos de entrada e saída.
-  - `services/`: serviços de RAG e integração com o LLM.
+  - `routes/`: rotas da API (`documents.py`, `questions.py`, `exams.py` e `exam_pdf.py`).
+  - `schemas/`: contratos de entrada e saída (`exam.py` e `question.py`).
+  - `services/`: serviços de RAG (`rag.py`), integração com o LLM (`llm.py`) e geração de PDF (`pdf.py`).
 - **`backend/chroma/`**: dados persistidos do armazenamento vetorial utilizado pelo backend.
 - **`frontend/`**: interface e interação com o usuário, ainda sem implementação.
 - **`frontend/AGENTS.md`**: diretrizes específicas do frontend, a serem preenchidas posteriormente.
@@ -172,26 +198,27 @@ O backend deve ser executado com diretório de trabalho em `backend/`, pois a co
 
 ## 6. Planejamento das entregas (To-do List)
 
-As tarefas abaixo estão organizadas por módulo e iniciam todas como pendentes. A divisão de responsabilidades é: José Fortunato no backend, Pedro Otávio no frontend e integração compartilhada.
+As tarefas abaixo estão organizadas por módulo e o status reflete o que já está implementado no código nesta etapa. A divisão de responsabilidades é: José Fortunato no backend, Pedro Otávio no frontend e integração compartilhada.
 
 ### 6.1 Backend
 
 | ID | Descrição | Módulo | Responsável | Status |
 |---|---|---|---|---|
 | BE-01 | Preparar ambiente e validar o backend existente. | Backend | José Fortunato | [ ] |
-| BE-02 | Definir formatos de documento suportados e regras de validação. | Backend | José Fortunato | [ ] |
-| BE-03 | Revisar e ajustar a extração de texto e a divisão em chunks. | Backend | José Fortunato | [ ] |
-| BE-04 | Revisar e ajustar a indexação e a persistência vetorial. | Backend | José Fortunato | [ ] |
-| BE-05 | Revisar e ajustar a recuperação de contexto (retrieval). | Backend | José Fortunato | [ ] |
+| BE-02 | Definir formatos de documento suportados e regras de validação. | Backend | José Fortunato | [x] |
+| BE-03 | Revisar e ajustar a extração de texto e a divisão em chunks. | Backend | José Fortunato | [x] |
+| BE-04 | Revisar e ajustar a indexação e a persistência vetorial. | Backend | José Fortunato | [x] |
+| BE-05 | Revisar e ajustar a recuperação de contexto (retrieval). | Backend | José Fortunato | [x] |
 | BE-06 | Definir e documentar a integração com o LLM. | Backend | José Fortunato | [ ] |
-| BE-07 | Implementar e validar a geração de questões de múltipla escolha. | Backend | José Fortunato | [ ] |
-| BE-08 | Implementar e validar a geração de questões subjetivas. | Backend | José Fortunato | [ ] |
+| BE-07 | Implementar e validar a geração de questões de múltipla escolha. | Backend | José Fortunato | [x] |
+| BE-08 | Implementar e validar a geração de questões subjetivas. | Backend | José Fortunato | [x] |
 | BE-09 | Validar a fidelidade ao contexto e tratar respostas inválidas do LLM. | Backend | José Fortunato | [ ] |
-| BE-10 | Disponibilizar a geração de questões em lote via API. | Backend | José Fortunato | [ ] |
-| BE-11 | Disponibilizar a geração de prova com distribuição por tipo via API. | Backend | José Fortunato | [ ] |
+| BE-10 | Disponibilizar a geração de questões em lote via API. | Backend | José Fortunato | [x] |
+| BE-11 | Disponibilizar a geração de prova com distribuição por tipo via API. | Backend | José Fortunato | [x] |
 | BE-12 | Definir e documentar o contrato de resposta consumido pelo frontend. | Backend | José Fortunato | [ ] |
 | BE-13 | Implementar testes automatizados do backend. | Backend | José Fortunato | [ ] |
 | BE-14 | Documentar execução e configuração no `backend/AGENTS.md`. | Backend | José Fortunato | [ ] |
+| BE-15 | Disponibilizar exportação da prova em PDF via API. | Backend | José Fortunato | [x] |
 
 ### 6.2 Frontend
 
@@ -269,6 +296,6 @@ Os nomes devem ser objetivos, descritivos e preferencialmente em inglês.
 - Suporte a múltiplos usuários.
 - Autenticação e autorização.
 - Idioma da interface e das questões.
-- Exportação ou download de provas.
+- Outros formatos de exportação além de PDF.
 - Requisitos de implantação e ambientes.
 - Estratégia de testes e critérios de aceitação.
