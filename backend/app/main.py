@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 
-from app.routes import questions, exams, documents
+from app.routes import questions, exams, documents, exam_pdf
 
 app = FastAPI(
     title="Exam Generator API",
@@ -11,7 +11,7 @@ app = FastAPI(
 app.include_router(documents.router)
 app.include_router(questions.router)
 app.include_router(exams.router)
-
+app.include_router(exam_pdf.router)
 
 @app.get("/")
 def home():

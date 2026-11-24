@@ -1,4 +1,3 @@
-
 import json
 
 from ollama import AsyncClient
@@ -21,68 +20,119 @@ MODEL = "qwen3:1.7b"
 client = AsyncClient()
 
 
-def build_prompt(context: str, types: list[str]) -> str:
-
-    return f"""
-Você é um gerador de questões acadêmicas.
-
-Gere exatamente {len(types)} questões utilizando
-exclusivamente as informações do contexto.
-
-CONTEXTO:
-{context}
-
-TIPOS DAS QUESTÕES:
-{json.dumps(types, ensure_ascii=False)}
-
-Respeite rigorosamente a ordem dos tipos solicitados.
-
-REGRAS:
-
-1. Questões multiple_choice:
-   - Enunciado.
-   - Cinco alternativas (A, B, C, D, E).
-   - Resposta correta.
-   - Explicação da resposta.
-
-2. Questões subjective:
-   - Enunciado.
-   - Resposta esperada.
-   - Critérios de correção.
-
-3. Não invente informações fora do contexto.
-4. Não inclua subject ou topic.
-5. Retorne somente JSON válido.
-
-FORMATO:
-
-{{
+FORMATS = {
+    "multiple_choice": """{
     "questions": [
-        {{
-            "type": "multiple_choice",
+        {
             "statement": "Enunciado",
-            "alternatives": {{
+            "alternatives": {
                 "A": "Alternativa A",
                 "B": "Alternativa B",
                 "C": "Alternativa C",
                 "D": "Alternativa D",
                 "E": "Alternativa E"
-            }},
+            },
             "correct_answer": "A",
             "explanation": "Explicação"
-        }},
-        {{
-            "type": "subjective",
+        }
+    ]
+}""",
+    "subjective": """{
+    "questions": [
+        {
             "statement": "Enunciado",
             "expected_answer": "Resposta esperada",
-            "grading_criteria": [
-                "Critério 1",
-                "Critério 2"
-            ]
-        }}
+            "grading_criteria": ["Critério 1", "Critério 2"]
+        }
     ]
-}}
+}""",
+}
+
+RULES = {
+    "multiple_choice": (
+        "Cada questão deve ter enunciado, cinco alternativas (A a E), "
+        "resposta correta e explicação."
+    ),
+    "subjective": (
+        "Cada questão deve ter enunciado, resposta esperada e critérios "
+        "de correção. NÃO use alternativas."
+    ),
+}
+
+
+def build_prompt(context: str, question_type: str, count: int) -> str:
+
+    return f"""
+Você é um gerador de questões acadêmicas.
+
+Gere exatamente {count} questões do tipo {question_type},
+utilizando exclusivamente as informações do contexto.
+
+CONTEXTO:
+{context}
+
+REGRAS:
+- {RULES[question_type]}
+- Não invente informações fora do contexto.
+- Retorne somente JSON válido.
+
+FORMATO (repita o item para cada questão):
+
+{FORMATS[question_type]}
 """
+
+
+async def _generate_batch(
+    context: str,
+    question_type: str,
+    count: int,
+    retries: int = 2
+) -> list[QuestionResponse]:
+
+    prompt = build_prompt(context, question_type, count)
+    last_error = None
+
+    for _ in range(retries + 1):
+
+        response = await client.chat(
+            model=MODEL,
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            format="json",
+            think=False,
+            options={
+                "temperature": 0.2
+            }
+        )
+
+        try:
+            data = json.loads(response["message"]["content"])
+            items = data["questions"]
+
+            if len(items) < count:
+                raise ValueError(
+                    f"Veio {len(items)} questão(ões), esperado {count}."
+                )
+
+            questions = []
+
+            for item in items[:count]:
+                # O código define o tipo, não o modelo
+                item["type"] = question_type
+                questions.append(QuestionResponse.model_validate(item))
+
+            return questions
+
+        except (ValueError, KeyError, TypeError) as e:
+            last_error = e
+
+    raise ValueError(
+        f"Falha ao gerar questões {question_type}: {last_error}"
+    )
 
 
 async def generate_questions(
@@ -91,53 +141,23 @@ async def generate_questions(
 
     # 1. Recupera os trechos do documento selecionado
     context = retrieve_context(
-    query=request.query,
-    top_k=5
-)
-    # 2. Monta o prompt
-    prompt = build_prompt(
-        context=context,
-        types=request.types
+        query=request.query,
+        top_k=5
     )
 
-    # 3. Envia para o Qwen
-    response = await client.chat(
-        model=MODEL,
-        messages=[
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ],
-        format="json",
-        options={
-            "temperature": 0.2
-        }
-    )
+    # 2. Uma chamada por tipo de questão
+    pools: dict[str, list[QuestionResponse]] = {}
 
-    # 4. Converte a resposta JSON
-    content = response["message"]["content"]
-    data = json.loads(content)
-
-    # 5. Valida as questões
-    questions = [
-        QuestionResponse.model_validate(question)
-        for question in data["questions"]
-    ]
-
-    # 6. Verifica quantidade e ordem
-    if len(questions) != len(request.types):
-        raise ValueError(
-            "Quantidade de questões retornada incorretamente."
+    for question_type in dict.fromkeys(request.types):
+        count = request.types.count(question_type)
+        pools[question_type] = await _generate_batch(
+            context,
+            question_type,
+            count
         )
 
-    for question, expected_type in zip(questions, request.types):
-        if question.type != expected_type:
-            raise ValueError(
-                "O Qwen não respeitou a ordem dos tipos solicitados."
-            )
-
-    return questions
+    # 3. Remonta na ordem pedida
+    return [pools[t].pop(0) for t in request.types]
 
 
 async def generate_exam(
@@ -152,8 +172,8 @@ async def generate_exam(
 
     # Reutiliza a geração de questões
     question_request = BatchQuestionRequest(
-    query=request.query,
-    types=types
+        query=request.query,
+        types=types
     )
     questions = await generate_questions(question_request)
 
